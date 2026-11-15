@@ -1,0 +1,371 @@
+--[[
+    Game: The Forge
+    Script: Main Hub (Auto Farm, Forge, Quests, Reroll, etc.)
+    UI Library: Fluent
+--]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/fluent.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/SaveManager.lua"))()
+local InterfaceManager = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/InterfaceManager.lua"))()
+
+local Window = Fluent:CreateWindow({
+    Title = "The Forge | Hub",
+    SubTitle = "v1.1.0",
+    TabWidth = 160,
+    Size = UDim2.fromOffset(580, 460),
+    Acrylic = true,
+    Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.RightShift
+})
+
+local Tabs = {
+    Main = Window:AddTab({ Title = "Main", Icon = "home" }),
+    Automation = Window:AddTab({ Title = "Automation", Icon = "cpu" }),
+    Player = Window:AddTab({ Title = "Player / Reroll", Icon = "user" }),
+    Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
+}
+
+local Options = Fluent.Options
+
+-- Resolve remotes safely (retry-friendly)
+local function GetRemotes()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if not remotes then
+        remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+    end
+    return remotes
+end
+
+local function GetRemote(name)
+    local remotes = GetRemotes()
+    return remotes and remotes:FindFirstChild(name)
+end
+
+local MineRemote = nil
+local ForgeRemote = nil
+local SellRemote = nil
+local QuestRemote = nil
+local CodeRemote = nil
+local RerollRemote = nil
+
+-- Refresh remote references each time we need them
+local function RefreshRemotes()
+    MineRemote = GetRemote("MineRock")
+    ForgeRemote = GetRemote("ForgeItem")
+    SellRemote = GetRemote("SellOres")
+    QuestRemote = GetRemote("CompleteQuest")
+    CodeRemote = GetRemote("RedeemCode")
+    RerollRemote = GetRemote("RerollRace")
+end
+
+-- Task manager: cancels previous worker before starting a new one
+local activeWorkers = {}
+
+local function RunLoop(key, conditionFn, interval, fn)
+    if activeWorkers[key] then
+        activeWorkers[key] = false
+    end
+    local worker = true
+    activeWorkers[key] = worker
+    task.spawn(function()
+        while worker and conditionFn() do
+            local ok, err = pcall(fn)
+            if not ok then
+                warn("Loop error [" .. tostring(key) .. "]:", err)
+            end
+            task.wait(interval)
+        end
+        if activeWorkers[key] == worker then
+            activeWorkers[key] = nil
+        end
+    end)
+end
+
+local function StopLoop(key)
+    if activeWorkers[key] then
+        activeWorkers[key] = false
+        activeWorkers[key] = nil
+    end
+end
+
+local function GetHRP()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function SafePivot(part)
+    local ok, pivot = pcall(function() return part:GetPivot() end)
+    if ok and pivot then
+        return pivot
+    end
+    local cframe = part.CFrame
+    return cframe and CFrame.new(cframe.Position) or CFrame.new()
+end
+
+--================================================--
+-- 1. AUTO MINE ROCK
+--================================================--
+local selectedWorld = "World 1"
+local autoMineEnabled = false
+
+Tabs.Main:AddDropdown("WorldDropdown", {
+    Title = "Select World",
+    Values = { "World 1", "World 2", "World 3", "World 4" },
+    Default = 1,
+    Callback = function(Value)
+        selectedWorld = Value
+    end
+})
+
+Tabs.Main:AddToggle("AutoMineToggle", {
+    Title = "Auto Mine Rocks",
+    Default = false,
+    Callback = function(Value)
+        autoMineEnabled = Value
+        if Value == then
+            RunLoop("AutoMine", function() return autoMineEnabled end, 0.5, function()
+                RefreshRemotes()
+                local worldFolder = workspace:FindFirstChild("Worlds") and workspace.Worlds:FindFirstChild(selectedWorld)
+                local oresFolder = worldFolder and worldFolder:FindFirstChild("Ores")
+                local hrp = GetHRP()
+                if not oresFolder or not hrp then return end
+
+local nearestOre, nearestDist = nil, math.huge
+                for _, ore in ipairs(oresFolder:GetChildren()) do
+                    local part = ore:FindFirstChild("Hitbox") or (ore:IsA("BasePart") and ore)
+                    if part then
+                        local dist = (hrp.Position - part.Position).Magnitude
+                        if dist < nearestDist then
+                            nearestDist = dist
+                            nearestOre = { ore = ore, part = part }
+                        end
+                    end
+                end
+
+if nearestOre and nearestDist > 8 then -- teleport only when far
+                    hrp.CFrame = SafePivot(nearestOre.ore) + Vector3.new(0, 3, 0)
+                end
+
+if nearestOre and MineRemote then
+                    MineRemote:FireServer(nearestOre.ore.Name) -- pass string reference, not Instance
+                end
+            end)
+        else
+            StopLoop("AutoMine")
+        end
+    end
+})
+
+--================================================--
+-- 2. INSTANT FORGE
+--================================================--
+local instantForgeEnabled = false
+
+Tabs.Main:AddToggle("InstantForgeToggle", {
+    Title = "Instant Forge / Smelt",
+    Default = false,
+    Callback = function(Value)
+        instantForgeEnabled = Value
+        if Value then
+            RunLoop("InstantForge", function() return instantForgeEnabled end, 1, function()
+                RefreshRemotes()
+                if ForgeRemote then
+                    for i = 1, 4 do
+                        ForgeRemote:FireServer("InstantComplete", i)
+                    end
+                end
+            end)
+        else
+            StopLoop("InstantForge")
+        end
+    end
+})
+
+--================================================--
+-- 3. AUTO SELL ORE
+--================================================--
+local autoSellEnabled = false
+
+Tabs.Automation:AddToggle("AutoSellToggle", {
+    Title = "Auto Sell Ores",
+    Default = false,
+    Callback = function(Value)
+        autoSellEnabled = Value
+        if Value then
+            RunLoop("AutoSell", function() return autoSellEnabled end, 10, function()
+                RefreshRemotes()
+                if SellRemote then
+                    SellRemote:FireServer("SellAll")
+                end
+            end)
+        else
+            StopLoop("AutoSell")
+        end
+    end
+})
+
+--================================================--
+-- 4. AUTO COMPLETE ADMIN EVENT / BOSS
+--================================================--
+local autoEventEnabled = false
+
+Tabs.Automation:AddToggle("AutoEventToggle", {
+    Title = "Auto Complete Admin Events / Bosses",
+    Default = false,
+    Callback = function(Value)
+        autoEventEnabled = Value
+        if Value then
+            RunLoop("AutoEvent", function() return autoEventEnabled end, 2, function()
+                local activeEvents = workspace:FindFirstChild("ActiveEvents")
+                local hrp = GetHRP()
+                if not activeEvents or not hrp then return end
+                for _, eventObj in ipairs(activeEvents:GetChildren()) do
+                    local targetPart = eventObj:FindFirstChild("HumanoidRootPart") or (eventObj:IsA("BasePart") and eventObj)
+                    if targetPart then
+                        hrp.CFrame = targetPart.CFrame + Vector3.new(0, 5, 0)
+                        -- trigger interaction/attack remote here when known
+                    end
+                end
+            end)
+        else
+            StopLoop("AutoEvent")
+        end
+    end
+})
+
+--================================================--
+-- 5. AUTO REDEEM CODES
+--================================================--
+local workingCodes = {
+    "RELEASE",
+    "THEFORGE10K",
+    "UPDATE1",
+    "FIXES"
+}
+
+Tabs.Automation:AddButton({
+    Title = "Redeem All Active Codes",
+    Description = "Automatically loops through and redeems hardcoded working codes.",
+    Callback = function()
+        RefreshRemotes()
+        for _, code in ipairs(workingCodes) do
+            if CodeRemote then
+                pcall(function() CodeRemote:FireServer(code) end)
+            end
+            task.wait(0.5)
+        end
+        Fluent:Notify({
+            Title = "Codes Redeemed",
+            Content = "Finished looping through active codes.",
+            Duration = 5
+        })
+    end
+})
+
+--================================================--
+-- 6. AUTO COMPLETE QUESTS
+--================================================--
+local autoQuestsEnabled = false
+
+Tabs.Automation:AddToggle("AutoQuestsToggle", {
+    Title = "Auto Complete Quests",
+    Default = false,
+    Callback = function(Value)
+        autoQuestsEnabled = Value
+        if Value then
+            RunLoop("AutoQuests", function() return autoQuestsEnabled end, 5, function()
+                RefreshRemotes()
+                if QuestRemote then
+                    for i = 1, 3 do
+                        QuestRemote:FireServer("ClaimQuest", i)
+                        QuestRemote:FireServer("ProgressQuest", i)
+                    end
+                end
+            end)
+        else
+            StopLoop("AutoQuests")
+        end
+    end
+})
+
+--================================================--
+-- 7. AUTO REROLL RACE
+--================================================--
+local targetRace = "Celestial"
+local autoRerollEnabled = false
+
+Tabs.Player:AddDropdown("RaceDropdown", {
+    Title = "Target Race",
+    Values = { "Human", "Elf", "Dwarf", "Demon", "Celestial" },
+    Default = 5,
+    Callback = function(Value)
+        targetRace = Value
+    end
+})
+
+Tabs.Player:AddToggle("AutoRerollToggle", {
+    Title = "Auto Reroll Race",
+    Default = false,
+    Callback = function(Value)
+        autoRerollEnabled = Value
+        if Value then
+            RunLoop("AutoReroll", function() return autoRerollEnabled end, 1.5, function()
+                RefreshRemotes()
+                local data = LocalPlayer:FindFirstChild("Data")
+                local raceVal = data and data:FindFirstChild("Race")
+
+if raceVal and raceVal.Value == targetRace then
+                    autoRerollEnabled = false
+                    StopLoop("AutoReroll")
+                    if Options and Options.AutoRerollToggle then
+                        Options.AutoRerollToggle:SetValue(false)
+                    end
+                    Fluent:Notify({
+                        Title = "Race Found!",
+                        Content = "Successfully rolled target race: " .. targetRace,
+                        Duration = 8
+                    })
+                    return
+                end
+
+if RerollRemote then
+                    RerollRemote:FireServer("RaceReroll")
+                end
+            end)
+        else
+            StopLoop("AutoReroll")
+        end
+    end
+})
+
+--================================================--
+-- SETTINGS & CONFIGURATION
+--================================================--
+SaveManager:SetLibrary(Fluent)
+InterfaceManager:SetLibrary(Fluent)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({})
+InterfaceManager:SetFolder("TheForgeHub")
+SaveManager:SetFolder("TheForgeHub/specific-game")
+
+InterfaceManager:BuildInterfaceSection(Tabs.Settings)
+SaveManager:BuildConfigSection(Tabs.Settings)
+
+Window:SelectTab(1)
+
+Fluent:Notify({
+    Title = "The Forge Hub Loaded",
+    Content = "Press RightShift to toggle the UI visibility.",
+    Duration = 8
+})
+
+SaveManager:LoadAutoloadConfig()
+RefreshRemotes()
